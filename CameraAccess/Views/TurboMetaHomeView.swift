@@ -4,6 +4,9 @@
  */
 
 import SwiftUI
+import AVFoundation
+import UIKit
+import AppIntents
 
 struct TurboMetaHomeView: View {
     @ObservedObject var streamViewModel: StreamSessionViewModel
@@ -18,6 +21,7 @@ struct TurboMetaHomeView: View {
     @State private var showLeanEat = false
     @State private var showQuickVision = false
     @State private var showLiveTranslate = false
+    @State private var showQuickTasks = false
 
     var body: some View {
         NavigationView {
@@ -102,7 +106,17 @@ struct TurboMetaHomeView: View {
                                 showRTMPStreaming = true
                             }
 
-                            // Row 4 - Screen Recording Stream
+                            // Row 4 - Quick Tasks
+                            FeatureCardWide(
+                                title: "home.quicktasks.title".localized,
+                                subtitle: "home.quicktasks.subtitle".localized,
+                                icon: "bolt.circle.fill",
+                                gradient: [Color.blue, Color.blue.opacity(0.7)]
+                            ) {
+                                showQuickTasks = true
+                            }
+
+                            // Row 5 - Screen Recording Stream
                             FeatureCardWide(
                                 title: "home.livestream.title".localized,
                                 subtitle: "home.livestream.subtitle".localized,
@@ -136,6 +150,9 @@ struct TurboMetaHomeView: View {
             .fullScreenCover(isPresented: $showLiveTranslate) {
                 LiveTranslateView(streamViewModel: streamViewModel)
             }
+            .fullScreenCover(isPresented: $showQuickTasks) {
+                QuickTasksView(streamViewModel: streamViewModel, apiKey: apiKey)
+            }
         }
         .onAppear {
             // 确保 QuickVisionManager 有 streamViewModel 引用
@@ -147,6 +164,215 @@ struct TurboMetaHomeView: View {
             // 从快捷指令触发，自动打开 Live AI 界面
             showLiveAI = true
         }
+    }
+}
+
+
+// MARK: - Quick Tasks View
+// 快捷任务界面 - 用于创建和管理车辆自动化任务
+
+struct QuickTasksView: View {
+    @ObservedObject var streamViewModel: StreamSessionViewModel
+    let apiKey: String
+
+    @StateObject private var quickTasksManager = QuickTasksManager.shared
+    @State private var showingErrorAlert = false
+    @State private var errorMessage = ""
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: AppSpacing.lg) {
+                // Header
+                VStack(spacing: AppSpacing.sm) {
+                    Text("快捷任务")
+                        .font(AppTypography.title2)
+                        .fontWeight(.bold)
+                        .foregroundColor(AppColors.textPrimary)
+
+                    Text("通过语音创建车辆自动化任务")
+                        .font(AppTypography.subheadline)
+                        .foregroundColor(AppColors.textSecondary)
+                }
+                .padding(.top, AppSpacing.xl)
+
+                // Status Indicator
+                HStack {
+                    Circle()
+                        .fill(getStatusColor())
+                        .frame(width: 12, height: 12)
+
+                    Text(getStatusText())
+                        .font(AppTypography.caption)
+                        .foregroundColor(getStatusColor())
+                }
+
+                // Action Buttons
+                VStack(spacing: AppSpacing.md) {
+                    // Start Session Button
+                    PrimaryButton(
+                        title: quickTasksManager.hasActiveSession ? "会话已建立" : "开始快捷任务",
+                        systemImage: quickTasksManager.hasActiveSession ? "checkmark.circle.fill" : "bolt.circle.fill",
+                        disabled: quickTasksManager.hasActiveSession || quickTasksManager.isProcessing
+                    ) {
+                        await quickTasksManager.startQuickTasksSession()
+                    }
+                    .opacity(quickTasksManager.hasActiveSession ? 0.7 : 1.0)
+
+                    // Record Button
+                    PrimaryButton(
+                        title: quickTasksManager.isListening ? "正在录音..." : "按住说话",
+                        systemImage: quickTasksManager.isListening ? "stop.circle.fill" : "mic.fill",
+                        backgroundColor: quickTasksManager.isListening ? .red : AppColors.primary,
+                        disabled: !quickTasksManager.hasActiveSession || quickTasksManager.isProcessing
+                    ) {
+                        if quickTasksManager.isListening {
+                            await quickTasksManager.stopRecordingAndSend()
+                        } else {
+                            quickTasksManager.startRecording()
+                        }
+                    }
+                    .simultaneousGesture(
+                        LongPressGesture(minimumDuration: 0.1)
+                            .onEnded { _ in
+                                if !quickTasksManager.isListening {
+                                    quickTasksManager.startRecording()
+                                }
+                            }
+                    )
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                if quickTasksManager.isListening && value.translation.height > 50 {
+                                    // Cancel recording if user drags up
+                                    quickTasksManager.audioRecorder?.stop()
+                                    quickTasksManager.audioRecorder = nil
+                                    quickTasksManager.isListening = false
+                                }
+                            }
+                            .onEnded { value in
+                                if quickTasksManager.isListening {
+                                    if value.translation.height > 50 {
+                                        // Cancelled
+                                        print("🎤 [QuickTasks] Recording cancelled")
+                                    } else {
+                                        // Complete recording
+                                        Task {
+                                            await quickTasksManager.stopRecordingAndSend()
+                                        }
+                                    }
+                                }
+                            }
+                    )
+
+                    // Clear Session Button
+                    PrimaryButton(
+                        title: "清除会话",
+                        systemImage: "xmark.circle.fill",
+                        backgroundColor: .secondary,
+                        disabled: !quickTasksManager.hasActiveSession
+                    ) {
+                        quickTasksManager.clearSession()
+                    }
+                }
+                .padding(.horizontal, AppSpacing.lg)
+
+                // Last Result
+                if let lastResult = quickTasksManager.lastResult {
+                    VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                        Text("最近结果:")
+                            .font(AppTypography.footnote)
+                            .foregroundColor(AppColors.textSecondary)
+
+                        Text(lastResult)
+                            .font(AppTypography.body)
+                            .foregroundColor(AppColors.textPrimary)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(AppSpacing.md)
+                            .background(AppColors.secondaryBackground)
+                            .cornerRadius(AppCornerRadius.md)
+                    }
+                    .padding(.horizontal, AppSpacing.lg)
+                }
+
+                Spacer()
+            }
+            .alert("错误", isPresented: $showingErrorAlert) {
+                Button("确定") { }
+            } message: {
+                Text(errorMessage)
+            }
+            .onChange(of: quickTasksManager.errorMessage) { newValue in
+                if let error = newValue {
+                    errorMessage = error
+                    showingErrorAlert = true
+                }
+            }
+            .onDisappear {
+                // 在页面消失时停止录音
+                if quickTasksManager.isListening {
+                    quickTasksManager.audioRecorder?.stop()
+                    quickTasksManager.audioRecorder = nil
+                    quickTasksManager.isListening = false
+                }
+            }
+        }
+        .navigationViewStyle(StackNavigationViewStyle())
+    }
+
+    private func getStatusColor() -> Color {
+        if quickTasksManager.isProcessing {
+            return .orange
+        } else if quickTasksManager.hasActiveSession {
+            return .green
+        } else {
+            return .gray
+        }
+    }
+
+    private func getStatusText() -> String {
+        if quickTasksManager.isProcessing {
+            return "处理中..."
+        } else if quickTasksManager.hasActiveSession {
+            return "会话已就绪"
+        } else {
+            return "等待启动"
+        }
+    }
+}
+
+// MARK: - Supporting Views
+
+struct PrimaryButton: View {
+    let title: String
+    let systemImage: String
+    var backgroundColor: Color = AppColors.primary
+    var disabled: Bool = false
+    let action: () async -> Void
+
+    var body: some View {
+        Button(action: {
+            Task {
+                await action()
+            }
+        }) {
+            HStack {
+                Image(systemName: systemImage)
+                    .font(.system(size: 18, weight: .medium))
+
+                Text(title)
+                    .font(AppTypography.headline)
+                    .fontWeight(.medium)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(AppSpacing.lg)
+            .background(disabled ? .secondary : backgroundColor)
+            .foregroundColor(.white)
+            .cornerRadius(AppCornerRadius.lg)
+            .opacity(disabled ? 0.5 : 1.0)
+        }
+        .disabled(disabled)
+        .buttonStyle(ScaleButtonStyle())
     }
 }
 

@@ -424,3 +424,7 @@
 // Live Translate Home Card
 "home.translate.title" = "实时翻译";
 "home.translate.subtitle" = "18种语言互译";
+
+// Quick Tasks Home Card
+"home.quicktasks.title" = "快捷任务";
+"home.quicktasks.subtitle" = "语音创建车辆自动化";
