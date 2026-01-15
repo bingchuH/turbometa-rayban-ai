@@ -44,7 +44,7 @@ class OmniRealtimeService: NSObject {
 
     // Configuration
     private let apiKey: String
-    private let model = "qwen3-omni-flash-realtime"
+    private let model = "qwen3-omni-flash-realtime-2025-12-01"
     // 根据用户设置的区域动态获取 WebSocket URL（北京/新加坡）
     private var baseURL: String {
         return APIProviderManager.staticLiveAIWebsocketURL

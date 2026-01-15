@@ -14,7 +14,7 @@ class TTSService: NSObject, ObservableObject {
     @Published var isSpeaking = false
 
     private let baseURL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
-    private let model = "qwen3-tts-flash"
+    private let model = "qwen3-tts-flash-2025-11-27"
 
     // 根据当前语言设置获取语音
     private var voice: String {
