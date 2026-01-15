@@ -179,6 +179,13 @@ struct QuickTasksView: View {
     @State private var showingErrorAlert = false
     @State private var errorMessage = ""
 
+    init(streamViewModel: StreamSessionViewModel, apiKey: String) {
+        self.streamViewModel = streamViewModel
+        self.apiKey = apiKey
+        // 在UI界面中只启用结果反馈，避免与用户操作冲突和节省token
+        QuickTasksManager.shared.ttsFeedbackMode = .resultsOnly
+    }
+
     var body: some View {
         NavigationView {
             VStack(spacing: AppSpacing.lg) {

@@ -275,6 +275,15 @@ struct QuickTasksIntent: AppIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let manager = QuickTasksManager.shared
 
+        // 在Intent模式下启用所有TTS反馈
+        let originalTTSFeedbackMode = manager.ttsFeedbackMode
+        manager.ttsFeedbackMode = .all
+
+        defer {
+            // 确保在函数退出前恢复原始设置
+            manager.ttsFeedbackMode = originalTTSFeedbackMode
+        }
+
         if let instruction = taskInstruction, !instruction.isEmpty {
             // 如果提供了具体指令，直接发送
             await manager.sendTextMessage(text: instruction)
@@ -308,8 +317,17 @@ struct QuickTasksHistoryIntent: AppIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let manager = QuickTasksManager.shared
 
-        if let result = manager.lastResult {
-            return .result(dialog: "最近创建的任务：\(result)")
+        // 在Intent模式下启用所有TTS反馈
+        let originalTTSFeedbackMode = manager.ttsFeedbackMode
+        manager.ttsFeedbackMode = .all
+
+        defer {
+            // 确保在函数退出前恢复原始设置
+            manager.ttsFeedbackMode = originalTTSFeedbackMode
+        }
+
+        if let resultValue = manager.lastResult {
+            return .result(dialog: "最近创建的任务：\(resultValue)")
         } else {
             return .result(dialog: "没有找到最近创建的任务")
         }
@@ -594,6 +612,31 @@ class QuickTasksManager: ObservableObject {
     private let quickTasksService = QuickTasksService()
     private let ttsService = TTSService.shared
 
+    // 控制是否启用TTS语音反馈
+    // - 全部启用（Intent模式）：所有TTS反馈都启用
+    // - 仅结果反馈（UI模式）：只在任务成功/失败时启用TTS反馈
+    // - 全部禁用：没有TTS反馈
+    enum TTSFeedbackMode {
+        case all        // 启用所有TTS反馈
+        case resultsOnly // 仅在结果时启用TTS反馈（成功/失败）
+        case none       // 不启用TTS反馈
+    }
+
+    var ttsFeedbackMode: TTSFeedbackMode = .all
+
+    // 检查是否应该播放TTS反馈
+    private func shouldPlayTTS(isResultFeedback: Bool = false) -> Bool {
+        switch ttsFeedbackMode {
+        case .all:
+            return true
+        case .resultsOnly:
+            // 仅结果反馈模式下，只在结果（成功/失败）时播放TTS
+            return isResultFeedback
+        case .none:
+            return false
+        }
+    }
+
     // Audio recording
     var audioRecorder: AVAudioRecorder?
     private var recordingSession: AVAudioSession!
@@ -639,20 +682,28 @@ class QuickTasksManager: ObservableObject {
 
             if success {
                 print("✅ [QuickTasks] Session started successfully")
-                ttsService.speak("请说出您的快捷任务指令")
+                if shouldPlayTTS(isResultFeedback: false) {  // 非结果反馈
+                    ttsService.speak("请说出您的快捷任务指令")
+                }
             } else {
                 print("❌ [QuickTasks] Failed to start session")
                 errorMessage = "会话启动失败"
-                ttsService.speak("会话启动失败，请重试")
+                if shouldPlayTTS(isResultFeedback: true) {  // 结果反馈
+                    ttsService.speak("会话启动失败，请重试")
+                }
             }
         } catch let error as QuickTasksError {
             errorMessage = error.localizedDescription
             print("❌ [QuickTasks] Start session error: \(error)")
-            ttsService.speak(error.localizedDescription)
+            if shouldPlayTTS(isResultFeedback: true) {  // 结果反馈
+                ttsService.speak(error.localizedDescription)
+            }
         } catch {
             errorMessage = error.localizedDescription
             print("❌ [QuickTasks] Start session error: \(error)")
-            ttsService.speak("服务暂时不可用，请稍后再试")
+            if shouldPlayTTS(isResultFeedback: true) {  // 结果反馈
+                ttsService.speak("服务暂时不可用，请稍后再试")
+            }
         }
 
         isProcessing = false
@@ -687,7 +738,9 @@ class QuickTasksManager: ObservableObject {
         } catch {
             print("❌ [QuickTasks] Recording failed: \(error)")
             isListening = false
-            ttsService.speak("录音失败，请重试")
+            if shouldPlayTTS(isResultFeedback: true) {  // 结果反馈
+                ttsService.speak("录音失败，请重试")
+            }
         }
     }
 
@@ -718,8 +771,10 @@ class QuickTasksManager: ObservableObject {
             lastResult = response
             print("✅ [QuickTasks] Voice message sent successfully: \(response)")
 
-            // 播放结果
-            ttsService.speak(response)
+            // 播放结果 - 这是结果反馈
+            if shouldPlayTTS(isResultFeedback: true) {
+                ttsService.speak(response)
+            }
 
             // 删除临时录音文件
             try? FileManager.default.removeItem(at: audioFileURL)
@@ -730,14 +785,18 @@ class QuickTasksManager: ObservableObject {
 
             // 根据错误类型提供不同的语音反馈
             let errorMessageText = getSpokenErrorMessage(error: error)
-            ttsService.speak(errorMessageText)
+            if shouldPlayTTS(isResultFeedback: true) {  // 结果反馈
+                ttsService.speak(errorMessageText)
+            }
 
             // 删除临时录音文件
             try? FileManager.default.removeItem(at: audioFileURL)
         } catch {
             errorMessage = error.localizedDescription
             print("❌ [QuickTasks] Send voice error: \(error)")
-            ttsService.speak("服务暂时不可用，请稍后再试")
+            if shouldPlayTTS(isResultFeedback: true) {  // 结果反馈
+                ttsService.speak("服务暂时不可用，请稍后再试")
+            }
 
             // 删除临时录音文件
             try? FileManager.default.removeItem(at: audioFileURL)
@@ -764,8 +823,10 @@ class QuickTasksManager: ObservableObject {
             lastResult = response
             print("✅ [QuickTasks] Text message sent successfully: \(response)")
 
-            // 播放结果
-            ttsService.speak(response)
+            // 播放结果 - 这是结果反馈
+            if shouldPlayTTS(isResultFeedback: true) {
+                ttsService.speak(response)
+            }
 
         } catch let error as QuickTasksError {
             errorMessage = error.localizedDescription
@@ -773,11 +834,15 @@ class QuickTasksManager: ObservableObject {
 
             // 根据错误类型提供不同的语音反馈
             let errorMessageText = getSpokenErrorMessage(error: error)
-            ttsService.speak(errorMessageText)
+            if shouldPlayTTS(isResultFeedback: true) {  // 结果反馈
+                ttsService.speak(errorMessageText)
+            }
         } catch {
             errorMessage = error.localizedDescription
             print("❌ [QuickTasks] Send text error: \(error)")
-            ttsService.speak("服务暂时不可用，请稍后再试")
+            if shouldPlayTTS(isResultFeedback: true) {  // 结果反馈
+                ttsService.speak("服务暂时不可用，请稍后再试")
+            }
         }
 
         isProcessing = false
