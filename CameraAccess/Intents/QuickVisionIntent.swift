@@ -608,6 +608,29 @@ class QuickTasksManager: ObservableObject {
     @Published var errorMessage: String?
     @Published var currentTranscript: String = ""
 
+    // ASR and Wake Word Detection
+    @Published var isWakeWordDetectionActive = false
+    private var omnirealtimeService: OmniRealtimeService?
+    private var wakeWordDetectionTimer: Timer?
+    private var currentASRTranscript = ""
+    private var silenceTimeout: TimeInterval = 2.0 // 默认2秒静音超时，稍后会从UserDefaults加载
+
+    // Wake words for detection
+    private let wakeWords: Set<String> = ["你好斑马", "嘿你好呀", "你好宝马", "嗨斑马", "斑马你好", "你好班马", "hello班马", "斑马斑马", "你好半马"]
+
+    // 在初始化时加载用户设置的静音超时值
+    private func loadUserSettings() {
+        let savedTimeout = UserDefaults.standard.double(forKey: "quick_tasks_silence_timeout")
+        if savedTimeout != 0 {
+            silenceTimeout = savedTimeout
+        } else {
+            // 默认值
+            silenceTimeout = 2.0
+            // 同时保存到UserDefaults以确保一致性
+            UserDefaults.standard.set(silenceTimeout, forKey: "quick_tasks_silence_timeout")
+        }
+    }
+
     // Service
     private let quickTasksService = QuickTasksService()
     private let ttsService = TTSService.shared
@@ -652,6 +675,8 @@ class QuickTasksManager: ObservableObject {
 
     private init() {
         setupAudioSession()
+        loadUserSettings()  // 加载用户配置
+        setupOmniRealtimeService()
     }
 
     private func setupAudioSession() {
@@ -662,6 +687,66 @@ class QuickTasksManager: ObservableObject {
             try recordingSession.setActive(true)
         } catch {
             print("❌ [QuickTasks] Audio session setup failed: \(error)")
+        }
+    }
+
+    private func setupOmniRealtimeService() {
+        // 初始化OmniRealtimeService用于ASR转录
+        if let apiKey = APIKeyManager.shared.getAPIKey(), !apiKey.isEmpty {
+            omnirealtimeService = OmniRealtimeService(apiKey: apiKey)
+            setupOmniCallbacks()
+        } else {
+            print("⚠️ [QuickTasks] API key not found, waiting for setup")
+        }
+    }
+
+    private func setupOmniCallbacks() {
+        omnirealtimeService?.onUserTranscript = { [weak self] transcript in
+            Task { @MainActor in
+                self?.handleASRTranscript(transcript)
+            }
+        }
+
+        // 也可以监听实时转录片段
+        omnirealtimeService?.onTranscriptDelta = { [weak self] delta in
+            Task { @MainActor in
+                // 实时检测，不需要积累完整的转录文本
+                if self?.detectWakeWord(in: delta) == true {
+                    print("✅ [QuickTasks] Wake word detected in delta: \(delta)")
+                    self?.startFormalRecording()
+                }
+            }
+        }
+
+        // 监听语音活动事件，以便在用户说话结束后重新激活唤醒词检测
+        omnirealtimeService?.onSpeechStopped = { [weak self] in
+            Task { @MainActor in
+                // 如果不是在正式录音模式，但处于唤醒词检测模式，则可以重置继续监听
+                if !(self?.isListening ?? false) && (self?.isWakeWordDetectionActive ?? false) {
+                    print("⏸️ [QuickTasks] Speech stopped, continuing wake word detection")
+                    // 保持唤醒词检测状态，继续监听
+                }
+            }
+        }
+
+        omnirealtimeService?.onConnected = { [weak self] in
+            Task { @MainActor in
+                print("✅ [QuickTasks] OmniRealtimeService connected for ASR")
+            }
+        }
+
+        omnirealtimeService?.onError = { [weak self] error in
+            Task { @MainActor in
+                print("❌ [QuickTasks] OmniRealtimeService error: \(error)")
+
+                // 如果出现错误且当前处于唤醒词检测模式，尝试重启
+                if self?.isWakeWordDetectionActive == true {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        self?.stopWakeWordDetection()
+                        self?.startWakeWordDetection()
+                    }
+                }
+            }
         }
     }
 
@@ -683,7 +768,7 @@ class QuickTasksManager: ObservableObject {
             if success {
                 print("✅ [QuickTasks] Session started successfully")
                 if shouldPlayTTS(isResultFeedback: false) {  // 非结果反馈
-                    ttsService.speak("请说出您的快捷任务指令")
+                    ttsService.speak("请说出唤醒词召唤快捷任务")
                 }
             } else {
                 print("❌ [QuickTasks] Failed to start session")
@@ -707,6 +792,134 @@ class QuickTasksManager: ObservableObject {
         }
 
         isProcessing = false
+    }
+
+    /// 处理ASR转录文本 - 唤醒词检测
+    private func handleASRTranscript(_ transcript: String) {
+        print("📝 [QuickTasks] Received ASR transcript: \(transcript)")
+
+        // 更新当前ASR转录文本
+        currentASRTranscript += transcript
+
+        // 检查是否包含唤醒词
+        if detectWakeWord(in: currentASRTranscript) {
+            // 检测到唤醒词，启动正式录音
+            print("✅ [QuickTasks] Wake word detected, starting formal recording")
+            startFormalRecording()
+        }
+    }
+
+    /// 检测唤醒词
+    private func detectWakeWord(in text: String) -> Bool {
+        let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 精确匹配，允许一些常见的标点符号和空格变化
+        for wakeWord in wakeWords {
+            if normalizedText.localizedCaseInsensitiveContains(wakeWord) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    /// 重置ASR转录文本
+    private func resetASRTranscript() {
+        currentASRTranscript = ""
+    }
+
+    /// 启动正式录音 - 检测到唤醒词后的流程
+    private func startFormalRecording() {
+        // 停止ASR监听
+        stopWakeWordDetection()
+
+        // 播放唤醒提示音
+        playWakeupSound()
+
+        // 播放语音提示（可选）
+        if shouldPlayTTS(isResultFeedback: false) {
+            ttsService.speak("请说您的指令")
+        }
+
+        // 启动手动录音（与UI的录音逻辑一致）
+        startRecording()
+    }
+
+    /// 播放唤醒提示音
+    private func playWakeupSound() {
+        // 查找wakeup.mp3文件
+        guard let soundURL = Bundle.main.url(forResource: "wakeup", withExtension: "mp3") else {
+            print("⚠️ [QuickTasks] wakeup.mp3 not found in bundle, skipping sound")
+            return
+        }
+
+        do {
+            // 创建音频播放器
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default)
+            try audioSession.setActive(true)
+
+            let soundPlayer = try AVAudioPlayer(contentsOf: soundURL)
+            soundPlayer.volume = 1.0
+            soundPlayer.play()
+
+            print("🔊 [QuickTasks] Wakeup sound played successfully")
+
+            // 设置播放完成回调（可选）
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak soundPlayer] in
+                // 保持播放器引用直到播放完成
+                _ = soundPlayer
+            }
+        } catch {
+            print("❌ [QuickTasks] Failed to play wakeup sound: \(error.localizedDescription)")
+        }
+    }
+
+    /// 启用唤醒词检测模式
+    func startWakeWordDetection() {
+        guard !isWakeWordDetectionActive else {
+            print("⚠️ [QuickTasks] Wake word detection already active")
+            return
+        }
+
+        // 检查API Key
+        if let apiKey = APIKeyManager.shared.getAPIKey(), !apiKey.isEmpty, omnirealtimeService == nil {
+            omnirealtimeService = OmniRealtimeService(apiKey: apiKey)
+            setupOmniCallbacks()
+        }
+
+        guard var service = omnirealtimeService else {
+            print("❌ [QuickTasks] OmniRealtime service not available")
+            return
+        }
+
+        isWakeWordDetectionActive = true
+        resetASRTranscript()
+
+        // 连接到ASR服务
+        service.connect()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            // 等待连接后开始录音
+            service.startRecording()
+            print("👂 [QuickTasks] Started wake word detection listening")
+        }
+    }
+
+    /// 停止唤醒词检测模式
+    func stopWakeWordDetection() {
+        guard isWakeWordDetectionActive else { return }
+
+        omnirealtimeService?.stopRecording()
+        omnirealtimeService = nil
+        isWakeWordDetectionActive = false
+        resetASRTranscript()
+
+        // 清除静音超时定时器
+        wakeWordDetectionTimer?.invalidate()
+        wakeWordDetectionTimer = nil
+
+        print("🛑 [QuickTasks] Wake word detection stopped")
     }
 
     /// 开始录音
@@ -735,6 +948,9 @@ class QuickTasksManager: ObservableObject {
             audioRecorder?.record()
 
             print("🎤 [QuickTasks] Started recording")
+
+            // 设置静音超时检测 - 2秒无语音则自动停止录音
+            startSilenceTimeoutTimer()
         } catch {
             print("❌ [QuickTasks] Recording failed: \(error)")
             isListening = false
@@ -744,8 +960,27 @@ class QuickTasksManager: ObservableObject {
         }
     }
 
+    /// 启动静音超时定时器
+    private func startSilenceTimeoutTimer() {
+        // 清除之前的定时器
+        wakeWordDetectionTimer?.invalidate()
+        wakeWordDetectionTimer = nil
+
+        // 设置新的定时器
+        wakeWordDetectionTimer = Timer.scheduledTimer(withTimeInterval: silenceTimeout, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                print("⏰ [QuickTasks] Silence timeout detected, stopping recording")
+                await self?.stopRecordingAndSend()
+            }
+        }
+    }
+
     /// 停止录音并发送
     func stopRecordingAndSend() async {
+        // 清除定时器
+        wakeWordDetectionTimer?.invalidate()
+        wakeWordDetectionTimer = nil
+
         guard isListening, let recorder = audioRecorder else {
             print("⚠️ [QuickTasks] Not recording")
             return
@@ -758,9 +993,18 @@ class QuickTasksManager: ObservableObject {
 
         let audioFileURL = getDocumentsDirectory().appendingPathComponent("quick_tasks_recording.m4a")
 
-        do {
-            let audioData = try Data(contentsOf: audioFileURL)
+        // 检查录音文件是否为空
+        guard FileManager.default.fileExists(atPath: audioFileURL.path),
+              let audioData = try? Data(contentsOf: audioFileURL),
+              !audioData.isEmpty else {
+            print("⚠️ [QuickTasks] Recording file is empty")
+            if shouldPlayTTS(isResultFeedback: true) {  // 结果反馈
+                ttsService.speak("没有检测到声音，请重试")
+            }
+            return
+        }
 
+        do {
             // 发送语音消息
             let response = try await quickTasksService.sendVoiceMessage(
                 voiceFileData: audioData,
@@ -894,6 +1138,22 @@ class QuickTasksManager: ObservableObject {
     /// 清除会话
     func clearSession() {
         quickTasksService.sessionId = nil
+    }
+
+    /// 更新API密钥后重新设置服务
+    func updateAPIKeyIfNeeded() {
+        if let apiKey = APIKeyManager.shared.getAPIKey(), !apiKey.isEmpty {
+            if omnirealtimeService == nil {
+                setupOmniRealtimeService()
+            }
+        }
+    }
+
+    /// 更新静音超时设置
+    func updateSilenceTimeout(_ newTimeout: TimeInterval) {
+        silenceTimeout = newTimeout
+        UserDefaults.standard.set(newTimeout, forKey: "quick_tasks_silence_timeout")
+        print("⏱️ [QuickTasks] Silence timeout updated to \(newTimeout)s")
     }
 }
 
