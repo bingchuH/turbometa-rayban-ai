@@ -108,6 +108,8 @@ struct LiveAISettingsView: View {
             return .orange
         case .custom:
             return .gray
+        case .quicktask:
+            return .yellow
         }
     }
 }

@@ -14,6 +14,7 @@ enum LiveAIMode: String, CaseIterable, Codable, Identifiable {
     case reading = "reading"            // 阅读模式
     case translate = "translate"        // 翻译模式
     case custom = "custom"              // 自定义提示词
+    case quicktask = "quicktask"        // 快捷任务模式
 
     var id: String { rawValue }
 
@@ -31,6 +32,8 @@ enum LiveAIMode: String, CaseIterable, Codable, Identifiable {
             return "liveai.mode.translate".localized
         case .custom:
             return "liveai.mode.custom".localized
+        case .quicktask:
+            return "liveai.mode.quicktask".localized
         }
     }
 
@@ -48,6 +51,8 @@ enum LiveAIMode: String, CaseIterable, Codable, Identifiable {
             return "character.bubble"
         case .custom:
             return "pencil.circle"
+        case .quicktask:
+            return "bolt.circle"
         }
     }
 
@@ -65,6 +70,8 @@ enum LiveAIMode: String, CaseIterable, Codable, Identifiable {
             return "liveai.mode.translate.desc".localized
         case .custom:
             return "liveai.mode.custom.desc".localized
+        case .quicktask:
+            return "liveai.mode.quicktask.desc".localized
         }
     }
 
@@ -85,6 +92,8 @@ enum LiveAIMode: String, CaseIterable, Codable, Identifiable {
         case .custom:
             // 自定义模式需要从 Manager 获取
             return ""
+        case .quicktask:
+            return "prompt.liveai.quicktask".localized
         }
     }
 
@@ -97,6 +106,8 @@ enum LiveAIMode: String, CaseIterable, Codable, Identifiable {
             return true  // 这些模式都需要看图
         case .custom:
             return true  // 自定义模式也支持图片
+        case .quicktask:
+            return false  // 快捷任务模式不需要看图
         }
     }
 }

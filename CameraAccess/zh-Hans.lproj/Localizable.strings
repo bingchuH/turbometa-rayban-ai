@@ -304,6 +304,8 @@
 "liveai.mode.reading.desc" = "识别并朗读文字内容";
 "liveai.mode.translate.desc" = "实时翻译看到的文字";
 "liveai.mode.custom.desc" = "使用自定义系统提示词";
+"liveai.mode.quicktask" = "快捷任务模式";
+"liveai.mode.quicktask.desc" = "识别语音创建车辆自动化任务";
 
 "liveai.settings" = "对话模式";
 "liveai.settings.mode" = "对话模式";
@@ -428,3 +430,5 @@
 // Quick Tasks Home Card
 "home.quicktasks.title" = "快捷任务";
 "home.quicktasks.subtitle" = "语音创建车辆自动化";
+"prompt.liveai.quicktask" = "你是一个智能车载快捷任务助手。
+判断这段语音是不是车载快捷任务，比如'当我上车的时候就播放音乐'，如果是，直接返回结构化JSON格式：{\"query\": \"提取的用户指令\"}，然后不要有任何其他回答。如果不是车载快捷任务则按照正常的对话方式回答用户。";

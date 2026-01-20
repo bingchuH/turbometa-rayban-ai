@@ -71,6 +71,8 @@ class OmniRealtimeService: NSObject {
     var onTranscriptDelta: ((String) -> Void)?
     var onTranscriptDone: ((String) -> Void)?
     var onUserTranscript: ((String) -> Void)? // 用户语音识别结果
+    var onQuickTaskTranscript: ((String) -> Void)? // 快捷任务语音识别结果
+    var onAssistantText: ((String) -> Void)? // AI助手文本回复
     var onAudioDelta: ((Data) -> Void)?
     var onAudioDone: (() -> Void)?
     var onSpeechStarted: (() -> Void)?
@@ -83,6 +85,11 @@ class OmniRealtimeService: NSObject {
     private var isRecording = false
     private var hasAudioBeenSent = false
     private var eventIdCounter = 0
+
+    // Quick task detection support
+    private var aiResponseBuffer = ""
+    private var aiResponseStartTime: TimeInterval = 0
+    private let quickTaskTimeout: TimeInterval = 2.0 // 2秒内检查是否为快捷任务
 
     init(apiKey: String) {
         self.apiKey = apiKey
@@ -198,13 +205,15 @@ class OmniRealtimeService: NSObject {
                 "voice": voice,
                 "input_audio_format": "pcm16",
                 "output_audio_format": "pcm24",
-                "smooth_output": true,
                 "instructions": instructions,
                 "turn_detection": [
                     "type": "server_vad",
                     "threshold": 0.5,
                     "silence_duration_ms": 800
-                ]
+                ],
+                // Configure response behavior for better quick task detection
+                "temperature": 0.7,
+                "max_response_output_tokens": 4096
             ]
         ]
 
@@ -408,7 +417,20 @@ class OmniRealtimeService: NSObject {
             case OmniServerEvent.responseAudioTranscriptDelta.rawValue:
                 if let delta = json["delta"] as? String {
                     print("💬 [Omni] AI回复片段: \(delta)")
-                    self.onTranscriptDelta?(delta)
+
+                    // Accumulate AI response to detect quick tasks
+                    self.aiResponseBuffer += delta
+
+                    // Check if the accumulated buffer contains a complete quick task JSON
+                    if self.tryDetectQuickTaskFromBuffer() {
+                        // Clear buffer after processing quick task
+                        self.aiResponseBuffer = ""
+                    } else {
+                        // Forward regular text delta
+                        self.onTranscriptDelta?(delta)
+                        // Also forward to assistant text callback if needed
+                        self.onAssistantText?(delta)
+                    }
                 }
 
             case OmniServerEvent.responseAudioTranscriptDone.rawValue:
@@ -480,7 +502,24 @@ class OmniRealtimeService: NSObject {
                 // 用户语音识别完成
                 if let transcript = json["transcript"] as? String {
                     print("👤 [Omni] 用户说: \(transcript)")
-                    self.onUserTranscript?(transcript)
+
+                    // 判断是否为快捷任务，如果 transcript 中包含特定 JSON 结构，则认为是快捷任务
+                    if transcript.trimmingCharacters(in: .whitespaces).hasPrefix("{") && transcript.trimmingCharacters(in: .whitespaces).hasSuffix("}") {
+                        // 尝试解析 JSON 来看是否是 {query: "..."} 格式
+                        if let jsonData = transcript.data(using: .utf8),
+                           let jsonObject = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                           let queryValue = jsonObject["query"] as? String {
+                            print("⚡ [Omni] 检测到快捷任务命令: \(queryValue)")
+                            self.onQuickTaskTranscript?(queryValue)
+                        } else {
+                            print("💬 [Omni] 一般对话命令")
+                            self.onUserTranscript?(transcript)
+                        }
+                    } else {
+                        // 直接发送用户转录文本，由接收方判断是否为快捷任务
+                        print("💬 [Omni] 一般对话命令")
+                        self.onUserTranscript?(transcript)
+                    }
                 }
 
             case OmniServerEvent.conversationItemCreated.rawValue:
@@ -498,6 +537,66 @@ class OmniRealtimeService: NSObject {
                 break
             }
         }
+    }
+
+    // MARK: - Quick Task Detection
+
+    private func tryDetectQuickTaskFromBuffer() -> Bool {
+        var buffer = self.aiResponseBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Check if buffer looks like it's starting a JSON object
+        if buffer.hasPrefix("{") {
+            // Try to find a complete JSON object by looking for matching braces
+            if let completeJson = extractCompleteJson(from: buffer) {
+                if let jsonData = completeJson.data(using: .utf8),
+                   let jsonObject = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                   let queryValue = jsonObject["query"] as? String {
+                    print("⚡ [Omni] 检测到快捷任务命令: \(queryValue)")
+                    // Call the quick task callback instead of TTS
+                    self.onQuickTaskTranscript?(queryValue)
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private func extractCompleteJson(from text: String) -> String? {
+        var braceCount = 0
+        var startIndex = text.startIndex
+
+        // Find opening brace
+        while startIndex < text.endIndex {
+            if text[startIndex] == "{" {
+                break
+            }
+            startIndex = text.index(after: startIndex)
+        }
+
+        // If no opening brace, return nil
+        if startIndex == text.endIndex {
+            return nil
+        }
+
+        var currentIndex = startIndex
+
+        // Count braces to find the matching closing brace
+        while currentIndex < text.endIndex {
+            if text[currentIndex] == "{" {
+                braceCount += 1
+            } else if text[currentIndex] == "}" {
+                braceCount -= 1
+                if braceCount == 0 {
+                    // Found matching closing brace
+                    let endIndex = text.index(after: currentIndex)
+                    return String(text[startIndex..<endIndex])
+                }
+            }
+            currentIndex = text.index(after: currentIndex)
+        }
+
+        // Didn't find a complete JSON object
+        return nil
     }
 
     // MARK: - Audio Playback (AVAudioEngine + AVAudioPlayerNode)
@@ -559,6 +658,29 @@ class OmniRealtimeService: NSObject {
     private func generateEventId() -> String {
         eventIdCounter += 1
         return "event_\(eventIdCounter)_\(UUID().uuidString.prefix(8))"
+    }
+
+    // Public method to update session configuration
+    func updateSessionConfiguration(instructions: String) {
+        let sessionConfig: [String: Any] = [
+            "event_id": generateEventId(),
+            "type": OmniClientEvent.sessionUpdate.rawValue,
+            "session": [
+                "modalities": ["text", "audio"],
+                "voice": LanguageManager.staticTtsVoice,
+                "input_audio_format": "pcm16",
+                "output_audio_format": "pcm24",
+                "smooth_output": true,
+                "instructions": instructions,
+                "turn_detection": [
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 800
+                ]
+            ]
+        ]
+
+        sendEvent(sessionConfig)
     }
 }
 

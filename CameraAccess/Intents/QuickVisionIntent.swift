@@ -707,6 +707,21 @@ class QuickTasksManager: ObservableObject {
             }
         }
 
+        // 监听快捷任务语音识别结果
+        omnirealtimeService?.onQuickTaskTranscript = { [weak self] transcript in
+            Task { @MainActor in
+                self?.handleQuickTaskTranscript(transcript)
+            }
+        }
+
+        // 监听AI助手的文本回复，以处理非语音形式的快捷任务检测
+        omnirealtimeService?.onAssistantText = { [weak self] text in
+            // 当AI回复是快捷任务时，此回调将被触发，但我们主要依靠onQuickTaskTranscript来处理
+            // 保持静默以避免TTS重复播放
+            // 对于快捷任务，不要触发任何TTS
+            print("🤖 [Omni] AI助手回复: \(text)")
+        }
+
         // 也可以监听实时转录片段
         omnirealtimeService?.onTranscriptDelta = { [weak self] delta in
             Task { @MainActor in
@@ -845,6 +860,64 @@ class QuickTasksManager: ObservableObject {
         startRecording()
     }
 
+    /// 处理快捷任务语音识别文本
+    private func handleQuickTaskTranscript(_ transcript: String) {
+        print("⚡ [QuickTasks] Received quick task transcript: \(transcript)")
+
+        // 直接将提取的查询发送到后端的文字接口
+        Task { @MainActor in
+            await sendQuickTaskQueryToBackend(transcript)
+        }
+    }
+
+    /// 将快捷任务查询发送到后端
+    private func sendQuickTaskQueryToBackend(_ query: String) async {
+        guard !isProcessing else {
+            print("⚠️ [QuickTasks] Already processing")
+            return
+        }
+
+        isProcessing = true
+        errorMessage = nil
+
+        do {
+            // 如果没有活跃会话，则启动新会话
+            if !hasActiveSession {
+                let success = try await quickTasksService.startSession(userId: userId, vin: vin)
+                if !success {
+                    throw QuickTasksError.sessionCreationFailed
+                }
+            }
+
+            let response = try await quickTasksService.sendMessage(
+                query: query,
+                userId: userId,
+                vin: vin
+            )
+
+            lastResult = response
+            print("✅ [QuickTasks] Quick task query sent successfully: \(response)")
+
+            // 不播放TTS响应，直接显示结果或保持静默
+            print("💬 [QuickTasks] 快捷任务执行结果: \(response)")
+
+        } catch let error as QuickTasksError {
+            errorMessage = error.localizedDescription
+            print("❌ [QuickTasks] Send quick task query error: \(error)")
+
+            // 快捷任务错误也不播放TTS
+            print("⚠️ [QuickTasks] 快捷任务错误，不播放TTS: \(error.localizedDescription)")
+        } catch {
+            errorMessage = error.localizedDescription
+            print("❌ [QuickTasks] Send quick task query error: \(error)")
+
+            // 快捷任务错误也不播放TTS
+            print("⚠️ [QuickTasks] 快捷任务错误，不播放TTS")
+        }
+
+        isProcessing = false
+    }
+
     /// 播放唤醒提示音
     private func playWakeupSound() {
         // 查找wakeup.mp3文件
@@ -898,6 +971,11 @@ class QuickTasksManager: ObservableObject {
 
         // 连接到ASR服务
         service.connect()
+
+        // 等待连接后配置使用快捷任务模式的提示词
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            service.updateSessionConfiguration(instructions: LiveAIMode.quicktask.systemPrompt)
+        }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             // 等待连接后开始录音
