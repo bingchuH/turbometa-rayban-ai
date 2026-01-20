@@ -90,6 +90,7 @@ class OmniRealtimeService: NSObject {
     private var aiResponseBuffer = ""
     private var aiResponseStartTime: TimeInterval = 0
     private let quickTaskTimeout: TimeInterval = 2.0 // 2秒内检查是否为快捷任务
+    private var shouldMuteAudioResponses = false // 是否静音音频回复
 
     init(apiKey: String) {
         self.apiKey = apiKey
@@ -552,6 +553,8 @@ class OmniRealtimeService: NSObject {
                    let jsonObject = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
                    let queryValue = jsonObject["query"] as? String {
                     print("⚡ [Omni] 检测到快捷任务命令: \(queryValue)")
+                    // Mute all audio responses during quick task processing
+                    self.shouldMuteAudioResponses = true
                     // Call the quick task callback instead of TTS
                     self.onQuickTaskTranscript?(queryValue)
                     return true
@@ -602,6 +605,12 @@ class OmniRealtimeService: NSObject {
     // MARK: - Audio Playback (AVAudioEngine + AVAudioPlayerNode)
 
     private func playAudio(_ audioData: Data) {
+        // Check if audio responses should be muted (during quick task processing)
+        if shouldMuteAudioResponses {
+            print("🔇 [Omni] 音频回复已静音（快捷任务模式）")
+            return
+        }
+
         guard let playerNode = playerNode,
               let playbackFormat = playbackFormat else {
             return
@@ -681,6 +690,12 @@ class OmniRealtimeService: NSObject {
         ]
 
         sendEvent(sessionConfig)
+    }
+
+    // Public method to unmute audio responses (call when quick task processing is done)
+    func unmuteAudioResponses() {
+        shouldMuteAudioResponses = false
+        print("🔊 [Omni] 音频回复已取消静音")
     }
 }
 

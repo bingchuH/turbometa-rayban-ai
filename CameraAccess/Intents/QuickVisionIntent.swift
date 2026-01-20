@@ -898,8 +898,10 @@ class QuickTasksManager: ObservableObject {
             lastResult = response
             print("✅ [QuickTasks] Quick task query sent successfully: \(response)")
 
-            // 不播放TTS响应，直接显示结果或保持静默
-            print("💬 [QuickTasks] 快捷任务执行结果: \(response)")
+            // 播放后端API返回的response内容
+            if shouldPlayTTS(isResultFeedback: true) {
+                ttsService.speak(response)
+            }
 
         } catch let error as QuickTasksError {
             errorMessage = error.localizedDescription
@@ -913,6 +915,11 @@ class QuickTasksManager: ObservableObject {
 
             // 快捷任务错误也不播放TTS
             print("⚠️ [QuickTasks] 快捷任务错误，不播放TTS")
+        }
+
+        // Quick task processing done, unmute Omni audio responses if needed
+        DispatchQueue.main.async {
+            self.omnirealtimeService?.unmuteAudioResponses()
         }
 
         isProcessing = false
