@@ -670,7 +670,7 @@ class QuickTasksManager: ObservableObject {
     }
 
     private var vin: String {
-        UserDefaults.standard.string(forKey: "quick_tasks_vin") ?? "default_vin_\(UUID().uuidString.prefix(8))"
+        "LSJEH43C0SZ000475"
     }
 
     private init() {
