@@ -614,6 +614,10 @@ class QuickTasksManager: ObservableObject {
     private var currentASRTranscript = ""
     private var silenceTimeout: TimeInterval = 2.0 // 默认2秒静音超时，稍后会从UserDefaults加载
 
+    // State flag for handling image+query analysis
+    private var isProcessingImageWithQuery = false
+    private var pendingQueryForImageAnalysis: String?
+
 
     // 在初始化时加载用户设置的静音超时值
     private func loadUserSettings() {
@@ -700,22 +704,55 @@ class QuickTasksManager: ObservableObject {
     private func setupOmniCallbacks() {
         omnirealtimeService?.onUserTranscript = { [weak self] transcript in
             Task { @MainActor in
-                // When in direct streaming mode, the transcript represents the arbitration result
-                // The model should return either {"query": "actual command"} or {"query": "off"}
-                print("📝 [QuickTasks] Received arbitration result: \(transcript)")
+                // Check if we're currently processing an image+query analysis
+                if self?.isProcessingImageWithQuery == true {
+                    // This is a response to the image+query analysis
+                    print("📝 [QuickTasks] Received image+query analysis result: \(transcript)")
 
-                // Try to parse as JSON to see if it's a quick task or general conversation
-                if let jsonData = transcript.data(using: .utf8),
-                   let jsonObject = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-                   let queryValue = jsonObject["query"] as? String {
+                    // Try to parse as JSON to extract the final query
+                    if let jsonData = transcript.data(using: .utf8),
+                       let jsonObject = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                       let queryValue = jsonObject["query"] as? String {
 
-                    if queryValue == "off" {
-                        print("⏭️ [QuickTasks] General conversation detected, no action needed")
-                        // For general conversation, we just return and no TTS should play
-                    } else {
-                        print("⚡ [QuickTasks] Quick task detected: \(queryValue)")
-                        // Process the actual quick task query
-                        await self?.sendQuickTaskQueryToBackend(queryValue)
+                        if queryValue != "off" {
+                            print("⚡ [QuickTasks] Processed query from image+text analysis: \(queryValue)")
+                            // Process this final query through the backend
+                            await self?.sendQuickTaskQueryToBackend(queryValue)
+                        }
+                    }
+
+                    // Reset the state flags
+                    self?.isProcessingImageWithQuery = false
+                    self?.pendingQueryForImageAnalysis = nil
+
+                    // Restore normal session configuration
+                    self?.restoreNormalQuickTaskSession()
+
+                } else {
+                    // When in direct streaming mode, the transcript represents the arbitration result
+                    // The model should return either {"query": "actual command"} or {"query": "off"}
+                    print("📝 [QuickTasks] Received arbitration result: \(transcript)")
+
+                    // Try to parse as JSON to see if it's a quick task or general conversation
+                    if let jsonData = transcript.data(using: .utf8),
+                       let jsonObject = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                       let queryValue = jsonObject["query"] as? String {
+
+                        if queryValue == "off" {
+                            print("⏭️ [QuickTasks] General conversation detected, no action needed")
+                            // For general conversation, we just return and no TTS should play
+                        } else {
+                            // Check if need_photo field exists and is true
+                            if let needPhoto = jsonObject["need_photo"] as? Bool, needPhoto == true {
+                                print("📸 [QuickTasks] Visual-enhanced quick task detected: \(queryValue)")
+                                // Handle visual-enhanced task by taking photo and sending to AI for processing
+                                await self?.handleVisualEnhancedQuickTask(queryValue)
+                            } else {
+                                print("⚡ [QuickTasks] Regular quick task detected: \(queryValue)")
+                                // Process the actual quick task query
+                                await self?.sendQuickTaskQueryToBackend(queryValue)
+                            }
+                        }
                     }
                 }
             }
@@ -724,7 +761,29 @@ class QuickTasksManager: ObservableObject {
         // 监听快捷任务语音识别结果
         omnirealtimeService?.onQuickTaskTranscript = { [weak self] transcript in
             Task { @MainActor in
-                self?.handleQuickTaskTranscript(transcript)
+                // Check if transcript is JSON format (could be from image+query analysis or arbitration)
+                if transcript.trimmingCharacters(in: .whitespaces).hasPrefix("{") && transcript.trimmingCharacters(in: .whitespaces).hasSuffix("}") {
+                    // Try to parse as JSON to see if it's the arbitration result format
+                    if let jsonData = transcript.data(using: .utf8),
+                       let jsonObject = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                       let queryValue = jsonObject["query"] as? String {
+
+                        if queryValue != "off", let needPhoto = jsonObject["need_photo"] as? Bool, needPhoto == true {
+                            print("🖼️ [QuickTasks] QuickTaskTranscript received visual-enhanced command: \(queryValue)")
+                            // This is a visual-enhanced result, handle accordingly
+                            await self?.handleVisualEnhancedQuickTask(queryValue)
+                        } else if queryValue != "off" {
+                            print("💬 [QuickTasks] QuickTaskTranscript received: \(queryValue)")
+                            await self?.sendQuickTaskQueryToBackend(queryValue)
+                        }
+                    } else {
+                        // Not a JSON format, handle as regular transcript
+                        self?.handleQuickTaskTranscript(transcript)
+                    }
+                } else {
+                    // Not a JSON format, handle as regular transcript
+                    self?.handleQuickTaskTranscript(transcript)
+                }
             }
         }
 
@@ -995,9 +1054,172 @@ class QuickTasksManager: ObservableObject {
         }
     }
 
+    /// 处理视觉增强型快捷任务
+    private func handleVisualEnhancedQuickTask(_ query: String) async {
+        print("📸 [QuickTasks] Processing visual-enhanced task: \(query)")
+
+        // Use the QuickVisionManager to take a photo and process with the query
+        let visionManager = QuickVisionManager.shared
+
+        // Check if we have a reference to the stream view model
+        guard let streamViewModel = visionManager.streamViewModel else {
+            print("❌ [QuickTasks] StreamViewModel not set for visual capture")
+            // Handle the error appropriately
+            return
+        }
+
+        do {
+            // 1. Check if device is connected
+            if !streamViewModel.hasActiveDevice {
+                print("❌ [QuickTasks] No active device connected")
+                throw QuickVisionError.noDevice
+            }
+
+            // 2. Start video stream if not already started
+            if streamViewModel.streamingStatus != .streaming {
+                print("📹 [QuickTasks] Starting stream for visual capture...")
+                await streamViewModel.handleStartStreaming()
+
+                // Wait for stream to be ready (max 5 seconds)
+                var streamWait = 0
+                while streamViewModel.streamingStatus != .streaming && streamWait < 50 {
+                    try await Task.sleep(nanoseconds: 100_000_000) // 0.1秒
+                    streamWait += 1
+                }
+
+                if streamViewModel.streamingStatus != .streaming {
+                    print("❌ [QuickTasks] Failed to start streaming")
+                    throw QuickVisionError.streamNotReady
+                }
+            }
+
+            // 3. Wait a bit for a clear frame
+            try await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
+
+            // 4. Clear previous photo and capture a new one
+            streamViewModel.dismissPhotoPreview()
+            print("📸 [QuickTasks] Capturing photo for visual task...")
+            streamViewModel.capturePhoto()
+
+            // 5. Wait for photo capture (max 3 seconds)
+            var photoWait = 0
+            while streamViewModel.capturedPhoto == nil && photoWait < 30 {
+                try await Task.sleep(nanoseconds: 100_000_000) // 0.1秒
+                photoWait += 1
+            }
+
+            // Get the captured photo (or fallback to current video frame)
+            let photo: UIImage
+            if let capturedPhoto = streamViewModel.capturedPhoto {
+                photo = capturedPhoto
+                print("📸 [QuickTasks] Using captured photo for visual task")
+            } else if let videoFrame = streamViewModel.currentVideoFrame {
+                photo = videoFrame
+                print("📸 [QuickTasks] Using video frame as fallback for visual task")
+            } else {
+                print("❌ [QuickTasks] No photo or video frame available")
+                throw QuickVisionError.frameTimeout
+            }
+
+            // 6. Stop the video stream after capturing photo (important!)
+            print("⏹️ [QuickTasks] Stopping video stream after photo capture")
+            await streamViewModel.stopSession()
+
+            // Use the Omni service to process both the query and the image
+            await processImageWithQuery(photo, for: query)
+
+        } catch let error as QuickVisionError {
+            print("❌ [QuickTasks] Visual capture error: \(error)")
+            errorMessage = error.localizedDescription
+        } catch {
+            print("❌ [QuickTasks] Visual capture error: \(error)")
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Process the image with the query to generate a complete query
+    private func processImageWithQuery(_ image: UIImage, for query: String) async {
+        print("🔍 [QuickTasks] Processing image and query for specific task extraction: \(query)")
+
+        // Convert image to base64
+        guard let imageData = image.jpegData(compressionQuality: 0.8) else {
+            print("❌ [QuickTasks] Failed to convert image to data")
+            await sendQuickTaskQueryToBackend(query) // Fallback to original query
+            return
+        }
+
+        let base64Image = imageData.base64EncodedString()
+
+        // Create a comprehensive prompt for the AI
+        let analysisPrompt = """
+        根据提供的图片内容和用户指令"\(query)"，分析图片中的详细信息，然后生成一个完整、具体、可执行的车辆自动化操作指令。
+
+        示例场景：
+        - 如果用户说"一会上车后播放眼前的这首歌"，请识别图中的具体歌曲或播放列表名称（如周杰伦的稻香），生成："上车后播放周杰伦的稻香"
+        - 如果用户说"当我上车后导航去屏幕上的地点"，请识别图中的具体地址或地点名称，生成："当我上车后导航至杭州市西湖区文三路199号"
+        - 如果用户说"帮我设置成屏幕上的温度"，请识别图中的具体温度值，生成："将空调温度设置为23度"
+
+        要求：
+        1. 仔细分析图片内容，提取与用户指令相关的具体信息
+        2. 生成一个完整、具体的设备操作指令，包含所有必要细节
+        3. 确保生成的指令与用户的原始意图一致
+        4. 返回格式：{"query": "完整的具体任务指令"}
+        5. 不要在JSON响应前后添加任何其他文字
+        """
+
+        // Use the QuickVisionService which already handles base64 image and prompt
+        guard let apiKey = APIKeyManager.shared.getAPIKey(), !apiKey.isEmpty else {
+            print("❌ [QuickTasks] API key not available")
+            await sendQuickTaskQueryToBackend(query) // Fallback to original query
+            return
+        }
+
+        do {
+            let quickVisionService = QuickVisionService(apiKey: apiKey)
+            let result = try await quickVisionService.analyzeImage(image, customPrompt: analysisPrompt)
+
+            print("🖼️ [QuickTasks] Image analysis result: \(result)")
+
+            // Try to extract the query from the response. The AI is instructed to return JSON format,
+            // but it might return plain text if format instructions weren't followed strictly
+            if let jsonData = result.data(using: .utf8),
+               let jsonObject = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+               let queryValue = jsonObject["query"] as? String {
+                print("✅ [QuickTasks] Final processed query from JSON: \(queryValue)")
+                await sendQuickTaskQueryToBackend(queryValue)
+            } else {
+                // If the response is not in JSON format but contains instructions, try to use it
+                let trimmedResult = result.trimmingCharacters(in: .whitespacesAndNewlines)
+                print("✅ [QuickTasks] Using direct result as query: \(trimmedResult)")
+                await sendQuickTaskQueryToBackend(trimmedResult)
+            }
+        } catch {
+            print("❌ [QuickTasks] Image analysis failed: \(error)")
+            // Fallback to original query
+            await sendQuickTaskQueryToBackend(query)
+        }
+    }
+
     /// 获取文档目录
     private func getDocumentsDirectory() -> URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    }
+
+    /// Restore normal quick task session configuration after image analysis
+    private func restoreNormalQuickTaskSession() {
+        guard let omniService = omnirealtimeService else { return }
+
+        // Restore the original arbitration instructions
+        let originalInstructions = """
+        你是一个AI助手，用于判断用户的查询是否与快速任务（车辆自动化）相关，以及是否需要视觉输入。
+        如果查询与车辆自动化、汽车功能、驾驶辅助或汽车控制相关：
+            - 如果查询涉及视觉元素（例如：“锁上那辆红色的汽车”、“调整我指向的座椅”、“打开我看到的灯”、“播放我面前的播放列表”、“导航到屏幕上的位置”），请回复：{"query": "实际的查询文本内容", "need_photo": true}
+            - 如果查询是基于文本的（例如：“当我到家时，播放音乐”、“我坐上座位后启动汽车”、“将温度设置为24度”），请回复：{"query": "实际的查询文本内容"}
+        如果查询是与快速任务无关的普通对话，请回复：{"query": "off"}
+        不要在JSON响应前后添加任何其他文本。
+        """
+
+        omniService.updateSessionConfiguration(instructions: originalInstructions)
     }
 
     /// 检查是否有活跃会话

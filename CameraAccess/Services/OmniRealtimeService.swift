@@ -206,11 +206,14 @@ class OmniRealtimeService: NSObject {
         if isDirectStreamingMode {
             // Arbitration mode: Determine if query is related to quick tasks or general conversation
             instructions = """
-            You are an AI assistant that determines if a user's query is related to quick tasks (vehicle automation) or general conversation.
-            If the query is related to vehicle automation, car functions, driving assistance, or car control, respond with a JSON object in this exact format: {"query": "the actual query text here"}.
-            If the query is general conversation unrelated to quick tasks, respond with a JSON object in this exact format: {"query": "off"}.
-            Do not add any other text before or after the JSON response.
+            你是一个AI助手，用于判断用户的查询是否与快速任务（车辆自动化）相关，以及是否需要视觉输入。
+            如果查询与车辆自动化、汽车功能、驾驶辅助或汽车控制相关：
+            - 如果查询涉及视觉元素（例如：“看一下这个位置，一会上车的时候导航去这里”、“调整我指向的座椅”、“打开我看到的灯”、“播放我面前的播放列表”、“导航到屏幕上的位置”），请回复：{"query": "实际的查询文本内容", "need_photo": true}
+            - 如果查询是基于文本的（例如：“当我到家时，播放音乐”、“我坐上座位后启动汽车”、“将温度设置为24度”），请回复：{"query": "实际的查询文本内容"}
+            如果查询是与快速任务无关的普通对话，请回复：{"query": "off"}
+            不要在JSON响应前后添加任何其他文本。
             """
+
         } else {
             instructions = LiveAIModeManager.staticSystemPrompt
         }
@@ -578,11 +581,20 @@ class OmniRealtimeService: NSObject {
                         self.aiResponseBuffer = ""
                         return true
                     } else {
-                        print("⚡ [Omni] 检测到快捷任务命令: \(queryValue)")
                         // Mute all audio responses during quick task processing
                         self.shouldMuteAudioResponses = true
-                        // Call the quick task callback instead of TTS
-                        self.onQuickTaskTranscript?(queryValue)
+
+                        // Check if need_photo field exists and is true
+                        if let needPhoto = jsonObject["need_photo"] as? Bool, needPhoto == true {
+                            print("📸 [Omni] 检测到视觉增强快捷任务命令: \(queryValue), 需要拍照")
+                            // Send the complete JSON object to onUserTranscript to maintain consistency with direct streaming logic
+                            self.onUserTranscript?(completeJson)
+                        } else {
+                            print("⚡ [Omni] 检测到快捷任务命令: \(queryValue)")
+                            // For simple queries without need_photo, send the query as before
+                            self.onUserTranscript?(queryValue)
+                        }
+
                         // Clear the buffer after processing
                         self.aiResponseBuffer = ""
                         return true
