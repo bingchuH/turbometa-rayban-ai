@@ -92,12 +92,8 @@ class OmniRealtimeService: NSObject {
     private let quickTaskTimeout: TimeInterval = 2.0 // 2秒内检查是否为快捷任务
     private var shouldMuteAudioResponses = false // 是否静音音频回复
 
-    // Flag to indicate if we're in direct streaming mode (no wake word)
-    private var isDirectStreamingMode = false
-
-    init(apiKey: String, isDirectStreaming: Bool = false) {
+    init(apiKey: String) {
         self.apiKey = apiKey
-        self.isDirectStreamingMode = isDirectStreaming
         super.init()
         setupAudioEngine()
     }
@@ -200,20 +196,7 @@ class OmniRealtimeService: NSObject {
     private func configureSession() {
         // 根据当前语言设置获取语音和提示词
         let voice = LanguageManager.staticTtsVoice
-
-        // Determine the instructions based on mode
-        let instructions: String
-        if isDirectStreamingMode {
-            // Arbitration mode: Determine if query is related to quick tasks or general conversation
-            instructions = """
-            You are an AI assistant that determines if a user's query is related to quick tasks (vehicle automation) or general conversation.
-            If the query is related to vehicle automation, car functions, driving assistance, or car control, respond with a JSON object in this exact format: {"query": "the actual query text here"}.
-            If the query is general conversation unrelated to quick tasks, respond with a JSON object in this exact format: {"query": "off"}.
-            Do not add any other text before or after the JSON response.
-            """
-        } else {
-            instructions = LiveAIModeManager.staticSystemPrompt
-        }
+        let instructions = LiveAIModeManager.staticSystemPrompt
 
         let sessionConfig: [String: Any] = [
             "event_id": generateEventId(),
@@ -560,7 +543,7 @@ class OmniRealtimeService: NSObject {
     // MARK: - Quick Task Detection
 
     private func tryDetectQuickTaskFromBuffer() -> Bool {
-        let buffer = self.aiResponseBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        var buffer = self.aiResponseBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Check if buffer looks like it's starting a JSON object
         if buffer.hasPrefix("{") {
@@ -569,24 +552,12 @@ class OmniRealtimeService: NSObject {
                 if let jsonData = completeJson.data(using: .utf8),
                    let jsonObject = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
                    let queryValue = jsonObject["query"] as? String {
-
-                    if queryValue == "off" {
-                        print("⏭️ [Omni] Query is off, skipping TTS and quick task processing")
-                        // Mute audio responses to skip TTS for general conversation
-                        self.shouldMuteAudioResponses = true
-                        // Clear the buffer after processing
-                        self.aiResponseBuffer = ""
-                        return true
-                    } else {
-                        print("⚡ [Omni] 检测到快捷任务命令: \(queryValue)")
-                        // Mute all audio responses during quick task processing
-                        self.shouldMuteAudioResponses = true
-                        // Call the quick task callback instead of TTS
-                        self.onQuickTaskTranscript?(queryValue)
-                        // Clear the buffer after processing
-                        self.aiResponseBuffer = ""
-                        return true
-                    }
+                    print("⚡ [Omni] 检测到快捷任务命令: \(queryValue)")
+                    // Mute all audio responses during quick task processing
+                    self.shouldMuteAudioResponses = true
+                    // Call the quick task callback instead of TTS
+                    self.onQuickTaskTranscript?(queryValue)
+                    return true
                 }
             }
         }

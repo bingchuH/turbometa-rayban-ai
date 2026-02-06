@@ -225,46 +225,23 @@ struct QuickTasksView: View {
                     }
                     .opacity(quickTasksManager.hasActiveSession ? 0.7 : 1.0)
 
-                    // Wake Word Detection Toggle
-                    Toggle("启用唤醒词检测", isOn: Binding(
-                        get: { quickTasksManager.isWakeWordDetectionActive },
-                        set: { isOn in
-                            if isOn {
-                                quickTasksManager.startWakeWordDetection()
-                            } else {
-                                quickTasksManager.stopWakeWordDetection()
-                            }
-                        }
-                    ))
-                    .toggleStyle(SwitchToggleStyle(tint: AppColors.primary))
-                    .padding(.horizontal, AppSpacing.lg)
-                    .disabled(!quickTasksManager.hasActiveSession || quickTasksManager.isProcessing)
-                    .opacity(quickTasksManager.hasActiveSession && !quickTasksManager.isProcessing ? 1.0 : 0.5)
-
-                    Text("当检测到唤醒词时自动开始录音")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, AppSpacing.lg)
-
-                    // Record Button
+                    // Record Button - Now directly starts audio streaming
                     PrimaryButton(
-                        title: quickTasksManager.isListening ? "正在录音..." : quickTasksManager.isWakeWordDetectionActive ? "唤醒词检测中..." : "按住说话",
-                        systemImage: quickTasksManager.isListening ? "stop.circle.fill" :
-                                     quickTasksManager.isWakeWordDetectionActive ? "ear.fill" : "mic.fill",
-                        backgroundColor: quickTasksManager.isListening ? .red :
-                                       quickTasksManager.isWakeWordDetectionActive ? .orange : AppColors.primary,
+                        title: quickTasksManager.isListening ? "正在录音..." : "开始对话",
+                        systemImage: quickTasksManager.isListening ? "stop.circle.fill" : "mic.fill",
+                        backgroundColor: quickTasksManager.isListening ? .red : AppColors.primary,
                         disabled: !quickTasksManager.hasActiveSession || quickTasksManager.isProcessing
                     ) {
                         if quickTasksManager.isListening {
                             await quickTasksManager.stopRecordingAndSend()
-                        } else if !quickTasksManager.isWakeWordDetectionActive {
+                        } else {
                             quickTasksManager.startRecording()
                         }
                     }
                     .simultaneousGesture(
                         LongPressGesture(minimumDuration: 0.1)
                             .onEnded { _ in
-                                if !quickTasksManager.isListening && !quickTasksManager.isWakeWordDetectionActive {
+                                if !quickTasksManager.isListening {
                                     quickTasksManager.startRecording()
                                 }
                             }
@@ -274,9 +251,9 @@ struct QuickTasksView: View {
                             .onChanged { value in
                                 if quickTasksManager.isListening && value.translation.height > 50 {
                                     // Cancel recording if user drags up
-                                    quickTasksManager.audioRecorder?.stop()
-                                    quickTasksManager.audioRecorder = nil
-                                    quickTasksManager.isListening = false
+                                    Task {
+                                        await quickTasksManager.stopRecordingAndSend()
+                                    }
                                 }
                             }
                             .onEnded { value in
@@ -339,11 +316,11 @@ struct QuickTasksView: View {
                 }
             }
             .onDisappear {
-                // 在页面消失时停止录音
+                // In direct streaming mode, stop the audio streaming when the view disappears
                 if quickTasksManager.isListening {
-                    quickTasksManager.audioRecorder?.stop()
-                    quickTasksManager.audioRecorder = nil
-                    quickTasksManager.isListening = false
+                    Task {
+                        await quickTasksManager.stopRecordingAndSend()
+                    }
                 }
             }
         }
