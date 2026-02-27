@@ -214,10 +214,11 @@ class OmniRealtimeService: NSObject {
             // 不要在JSON响应前后添加任何其他文本。
             // """
             instructions = """
-            你是一个AI助手，用于判断用户的查询是否与快速任务（车辆自动化）相关。
+            你是一个AI助手，用于判断用户的查询是否与快捷任务（车辆自动化）相关，以及是否需要视觉输入。
+            如果查询是与车辆无关的普通对话，请回复：{"query": "off"}
             如果查询与车辆自动化、汽车功能、驾驶辅助或汽车控制相关：
-            例如：“一会上车的时候导航去这里”、“一会上车的时候播放这首歌”、、“导航到屏幕上的位置”），请回复：{"need_photo": true, "query": "实际的查询文本内容"}
-            如果查询是与快速任务无关的普通对话，请回复：{"query": "off"}
+            - 如果用户话术中涉及指代词比如 这/那/这些/那些/这个/那个等，（例如："这个音乐不错，上车的时候播放一下"、"导航到这个位置"），而缺乏具体的指代对象，请回复：{"query": "实际的查询文本内容", "need_photo": true}
+            - 如果查询是仅基于文本的（例如："当我到家时，播放音乐"、"我坐上座位后启动汽车"、"将温度设置为24度"），请回复：{"query": "实际的查询文本内容", "need_photo": false}
             不要在JSON响应前后添加任何其他文本。
             """
 
@@ -453,6 +454,8 @@ class OmniRealtimeService: NSObject {
                     if self.tryDetectQuickTaskFromBuffer() {
                         // Clear buffer after processing quick task
                         self.aiResponseBuffer = ""
+                        // Do NOT forward the delta to avoid playing JSON as speech
+                        // The JSON was processed internally and shouldn't be spoken
                     } else {
                         // Forward regular text delta
                         self.onTranscriptDelta?(delta)
@@ -588,18 +591,23 @@ class OmniRealtimeService: NSObject {
                         self.aiResponseBuffer = ""
                         return true
                     } else {
-                        // Mute all audio responses during quick task processing
-                        self.shouldMuteAudioResponses = true
-
                         // Check if need_photo field exists and is true
                         if let needPhoto = jsonObject["need_photo"] as? Bool, needPhoto == true {
                             print("📸 [Omni] 检测到视觉增强快捷任务命令: \(queryValue), 需要拍照")
                             // Send the complete JSON object to onUserTranscript to maintain consistency with direct streaming logic
                             self.onUserTranscript?(completeJson)
+
+                            // For visual tasks, keep audio muted during photo capture and processing
+                            self.shouldMuteAudioResponses = true
                         } else {
                             print("⚡ [Omni] 检测到快捷任务命令: \(queryValue)")
-                            // For simple queries without need_photo, send the query as before
-                            self.onUserTranscript?(queryValue)
+                            // Send the complete JSON object to onUserTranscript so QuickTasksManager can distinguish
+                            // between general conversation and quick tasks based on the need_photo field
+                            self.onUserTranscript?(completeJson)
+
+                            // For non-visual tasks, we should also keep audio muted during backend processing
+                            // but audio will be unmuted after task is sent as handled by QuickTasksManager
+                            self.shouldMuteAudioResponses = true
                         }
 
                         // Clear the buffer after processing
